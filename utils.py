@@ -2,7 +2,8 @@
 # Helper functions for Exploratory Data Analysis (EDA) on time series data
 
 # --- Imports ---
-import pandas as pd # <--- Added this import
+import pandas as pd
+import numpy as np # Needed for histogram bounds
 import matplotlib.pyplot as plt
 import seaborn as sns
 from statsmodels.graphics.tsaplots import plot_acf, plot_pacf
@@ -153,14 +154,17 @@ def plot_acf_pacf(series, lags=40, title_suffix=''):
     plt.tight_layout()
     plt.show()
 
-def plot_correlation_heatmap(df, columns=None, title='Correlation Matrix', figsize=(12, 10)):
+# --- UPDATED plot_correlation_heatmap function ---
+def plot_correlation_heatmap(df, columns=None, method='pearson', title='', figsize=(12, 10)):
     """
-    Calculates and displays a heatmap of the correlation matrix for specified columns.
+    Calculates and displays a heatmap of the correlation matrix for specified columns,
+    using either Pearson or Spearman method.
 
     Args:
         df (pandas.DataFrame): DataFrame containing the data.
         columns (list, optional): List of column names to include. If None, uses all numeric columns. Defaults to None.
-        title (str, optional): Title for the heatmap. Defaults to 'Correlation Matrix'.
+        method (str, optional): Method of correlation ('pearson' or 'spearman'). Defaults to 'pearson'.
+        title (str, optional): Title for the heatmap. Defaults to include method name.
         figsize (tuple, optional): Figure size. Defaults to (12, 10).
     """
     plt.figure(figsize=figsize)
@@ -179,11 +183,22 @@ def plot_correlation_heatmap(df, columns=None, title='Correlation Matrix', figsi
         print("Warning: No numeric columns found/selected for correlation heatmap.")
         return
 
-    corr = data_to_corr.corr()
+    # Calculate correlation using the specified method
+    try:
+        corr = data_to_corr.corr(method=method)
+    except ValueError:
+        print(f"Error: Invalid correlation method '{method}'. Use 'pearson' or 'spearman'.")
+        return
+
+    # Generate title if not provided
+    if not title:
+        title = f'{method.capitalize()} Correlation Matrix'
+
     sns.heatmap(corr, annot=True, cmap='coolwarm', fmt=".2f", linewidths=.5)
     plt.title(title)
     plt.tight_layout()
     plt.show()
+# --- END of UPDATED function ---
 
 # --- Statistical Test Functions ---
 
@@ -238,7 +253,15 @@ def run_stationarity_tests(series, series_name=''):
         if kpss_result_c[1] >= 0.05:
             print("  Conclusion: Likely Stationary around constant (fail to reject H0 at 5% level)")
         else:
-            print("  Conclusion: Likely Non-Stationary around constant (reject H0 at 5% level)")
+            kpss_result_ct = kpss(series_clean, regression='ct', nlags='auto')
+            print(f'  KPSS Statistic: {kpss_result_c[0]:.4f}')
+            print(f'  p-value: {kpss_result_c[1]:.4f}')
+            print(f'  Lags Used: {kpss_result_c[2]}')
+            print(f'  Critical Values:')
+            if kpss_result_c[1] >= 0.05:
+                print("  Conclusion: Likely Stationary around trend (fail to reject H0 at 5% level)")
+            else:
+                print("  Conclusion: Likely Non-Stationary around trend too (reject H0 at 5% level)")
     except Exception as e:
         print(f"  KPSS Test (constant) Error: {e}")
 
@@ -261,9 +284,9 @@ def run_stationarity_tests(series, series_name=''):
 
     print('---------------------------------------\n')
 
-# --- Outlier Detection Function ---
+# --- Outlier Detection & Visualization Functions ---
 
-def identify_outliers_iqr(series, series_name='', multiplier=1.5): # Added series_name argument
+def identify_outliers_iqr(series, series_name='', multiplier=1.5):
     """
     Identifies potential outliers in a Series using the Interquartile Range (IQR) method.
 
@@ -273,21 +296,28 @@ def identify_outliers_iqr(series, series_name='', multiplier=1.5): # Added serie
         multiplier (float, optional): The IQR multiplier to define outlier bounds. Defaults to 1.5.
 
     Returns:
-        pandas.Index: The index values of the identified outliers. Returns empty index if series is empty.
+        tuple: A tuple containing:
+            - pandas.Index: The index values of the identified outliers.
+            - float: The calculated lower bound for outliers.
+            - float: The calculated upper bound for outliers.
+            - bool: True if IQR was zero, False otherwise.
     """
     if series.empty:
         print(f"Warning: Series '{series_name}' is empty. Cannot identify outliers.")
-        return pd.Index([])
+        return pd.Index([]), np.nan, np.nan, False
 
     q1 = series.quantile(0.25)
     q3 = series.quantile(0.75)
     iqr = q3 - q1
+    iqr_zero = False
 
     # Handle cases where IQR might be zero (e.g., constant data)
     if iqr == 0:
-        # --- This is the updated warning line ---
         print(f"Warning: IQR for '{series_name}' is zero. Outlier detection based on IQR might not be meaningful.")
-        # Return points that are not equal to the median (or Q1/Q3)
+        iqr_zero = True
+        # Define bounds based on median or simply use Q1/Q3 which are the same
+        lower_bound = q1
+        upper_bound = q3
         median_val = series.median()
         outliers = series[series != median_val]
     else:
@@ -295,8 +325,80 @@ def identify_outliers_iqr(series, series_name='', multiplier=1.5): # Added serie
         upper_bound = q3 + multiplier * iqr
         outliers = series[(series < lower_bound) | (series > upper_bound)]
 
-    print(f"Identified {len(outliers)} potential outliers for '{series_name}' using IQR method (multiplier={multiplier}).")
-    return outliers.index
+    print(f"Identified {len(outliers)} potential outliers for '{series_name}' using IQR method (multiplier={multiplier}). Bounds: ({lower_bound:.4f}, {upper_bound:.4f})")
+
+    return outliers.index, lower_bound, upper_bound, iqr_zero
+
+def plot_histogram_with_outliers(series, series_name='', multiplier=1.5, bins=30):
+    """
+    Plots a histogram of the series and marks the IQR outlier bounds.
+
+    Args:
+        series (pandas.Series): The data series to plot.
+        series_name (str, optional): Name for the plot title. Defaults to ''.
+        multiplier (float, optional): IQR multiplier for bounds. Defaults to 1.5.
+        bins (int, optional): Number of bins for the histogram. Defaults to 30.
+    """
+    plt.figure(figsize=(10, 5))
+    sns.histplot(series, bins=bins, kde=True)
+    plt.title(f'Histogram of {series_name}')
+
+    # Calculate bounds (using the same logic as identify_outliers_iqr)
+    q1 = series.quantile(0.25)
+    q3 = series.quantile(0.75)
+    iqr = q3 - q1
+
+    if iqr > 0: # Only draw lines if IQR is not zero
+        lower_bound = q1 - multiplier * iqr
+        upper_bound = q3 + multiplier * iqr
+        plt.axvline(lower_bound, color='r', linestyle='--', label=f'Lower Bound ({lower_bound:.2f})')
+        plt.axvline(upper_bound, color='r', linestyle='--', label=f'Upper Bound ({upper_bound:.2f})')
+        plt.legend()
+    else:
+        plt.axvline(q1, color='orange', linestyle='--', label=f'Q1/Median/Q3 ({q1:.2f})')
+        plt.legend()
+
+
+    plt.grid(axis='y', alpha=0.5)
+    plt.tight_layout()
+    plt.show()
+
+def plot_series_with_outliers(df, column_name, title='', xlabel='Date', ylabel='', multiplier=1.5):
+    """
+    Plots a time series and highlights outliers identified by the IQR method.
+
+    Args:
+        df (pandas.DataFrame): DataFrame containing the time series.
+        column_name (str): The name of the column to plot.
+        title (str, optional): Title for the plot. Defaults to column name.
+        xlabel (str, optional): Label for the x-axis. Defaults to 'Date'.
+        ylabel (str, optional): Label for the y-axis. Defaults to column name.
+        multiplier (float, optional): IQR multiplier used to identify outliers. Defaults to 1.5.
+    """
+    if column_name not in df.columns:
+        print(f"Error: Column '{column_name}' not found in DataFrame.")
+        return
+
+    # Identify outliers first
+    outlier_indices, _, _, _ = identify_outliers_iqr(df[column_name], series_name=column_name, multiplier=multiplier)
+
+    plt.figure(figsize=(15, 5))
+    # Plot the main series
+    sns.lineplot(data=df, x=df.index, y=column_name, label=column_name, zorder=1)
+
+    # Overlay outliers if any exist
+    if not outlier_indices.empty:
+        sns.scatterplot(data=df.loc[outlier_indices], x=outlier_indices, y=column_name,
+                        color='red', s=50, label='Outliers (IQR)', zorder=2)
+
+    plt.title(title if title else f'{column_name} over Time with Outliers')
+    plt.xlabel(xlabel)
+    plt.ylabel(ylabel if ylabel else column_name)
+    plt.grid(True)
+    plt.legend()
+    plt.tight_layout()
+    plt.show()
+
 
 # --- Example Usage (if run as script) ---
 if __name__ == '__main__':
@@ -306,12 +408,7 @@ if __name__ == '__main__':
     # filepath = 'lumber_delivery_preprocessed.csv'
     # df = load_and_prep_data(filepath)
     # if df is not None:
-    #     plot_time_series(df, 'Reschedule_Rate', title='Reschedule Rate Over Time')
-    #     run_stationarity_tests(df['Reschedule_Rate'], 'Reschedule_Rate')
-    #     plot_acf_pacf(df['Reschedule_Rate'], title_suffix='for Reschedule_Rate')
-    #     outlier_indices = identify_outliers_iqr(df['Reschedule_Rate'])
-    #     print(f"Outlier indices: {outlier_indices.tolist()}")
-    #     # Select relevant columns for correlation
+    #     # plot_histogram_with_outliers(df['Reschedule_Rate'], series_name='Reschedule_Rate')
+    #     # plot_series_with_outliers(df, 'Reschedule_Rate', title='Reschedule Rate with Outliers')
     #     corr_cols = ['Reschedule_Rate', 'Truck_Utilization_Efficiency', 'WPU081', 'GASREGW', 'DFF']
-    #     plot_correlation_heatmap(df, columns=corr_cols)
-
+    #     plot_correlation_heatmap(df, columns=corr_cols, method='spearman', title='Spearman Correlation') # Example Spearman
